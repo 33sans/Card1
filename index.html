@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -29,6 +29,21 @@
   background:rgba(243,240,228,.92);
 }
 
+
+/* Local storage panel */
+.local-panel{display:grid;gap:10px}
+.local-row{display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+.local-row:last-child{border-bottom:0}
+.local-meta{min-width:0}
+.local-meta strong{display:block;font:600 13px/1.3 "Iowan Old Style","Noto Serif TC",serif;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.local-meta small{display:block;color:var(--muted);font:10px/1.4 Arial,"Microsoft JhengHei",sans-serif}
+.local-empty{color:var(--muted);font:12px Arial,"Microsoft JhengHei",sans-serif;padding:8px 0}
+.local-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.autosave-status{font:11px Arial,"Microsoft JhengHei",sans-serif;color:var(--muted);margin-top:6px}
+.autosave-status.on{color:var(--green)}
+.slot-name-input{width:100%;color:var(--text);background:transparent;border:0;border-bottom:1px solid var(--line);padding:8px 2px;outline:none;font:13px Arial,"Microsoft JhengHei",sans-serif}
+.slot-name-input:focus{border-color:var(--red);box-shadow:0 1px 0 var(--red)}
+
 </style>
 </head>
 <body><div class="shell">
@@ -45,13 +60,29 @@
 </main><aside class="side">
 
 <section class="card"><div class="section-head"><div><h2>判定速查</h2><p>常用公式整理</p></div><span class="tag">RULES</span></div><div class="rules" id="combatTable"></div></section>
+
+<section class="card"><div class="section-head"><div><h2>本機儲存</h2><p>自動存檔＋多角色槽位管理</p></div><span class="tag">LOCAL</span></div>
+<div class="local-panel">
+  <div>
+    <label class="small-label" for="slotName">儲存名稱（可自訂）</label>
+    <input class="slot-name-input" id="slotName" placeholder="例如：艾拉 Lv12" oninput="syncSlotNameHint()">
+  </div>
+  <div class="local-actions">
+    <button class="btn primary" onclick="saveToLocalSlot()">儲存到本機</button>
+    <button class="btn" onclick="newCharacter()">新建角色</button>
+  </div>
+  <div class="autosave-status" id="autosaveStatus">自動存檔：待命</div>
+  <div id="localSlotsList" class="local-panel"></div>
+</div>
+<p class="footnote">變更會自動寫入瀏覽器本機；肖像僅在手動「儲存到本機」與 JSON 檔案中保留。清除瀏覽器資料會一併刪除。</p>
+</section>
 <section class="card"><div class="section-head"><div><h2>角色卡文字</h2><p>複製後即可分享或保存</p></div></div><textarea class="export" id="outputText" readonly></textarea><div class="actions" style="margin-top:11px">
 <button class="btn primary" onclick="copyCardText()">複製角色卡</button>
 <button class="btn" onclick="downloadCard()">下載 .txt</button>
 <button class="btn" onclick="saveCharacterFile()">儲存角色卡</button>
 <button class="btn" onclick="document.getElementById('loadCharacterFile').click()">載入角色卡</button>
 <input id="loadCharacterFile" type="file" accept=".json,application/json" hidden onchange="loadCharacterFileFromDisk(event)">
-</div><p class="footnote">內容會自動保存在此瀏覽器；也可用「儲存角色卡」下載 JSON 備份，之後再載入。</p></section>
+</div><p class="footnote">上方「本機儲存」可管理多角色；此處可複製文字、下載 .txt，或以 JSON 備份／載入（含肖像）。</p></section>
 </aside></div></div><div class="toast" id="toast">角色卡已複製</div>
 <script>
 const statList=[{id:'str',name:'力量',hint:'近戰攻擊與物理傷害'},{id:'sta',name:'體質',hint:'生命值與傷害減免'},{id:'agi',name:'敏捷',hint:'防禦與先攻'},{id:'per',name:'感知',hint:'先攻與觀察'},{id:'int',name:'智力',hint:'法術判定與魔法傷害'},{id:'tal',name:'才藝',hint:'工具經驗加值'}];
@@ -175,28 +206,236 @@ function loadCharacterFileFromDisk(event){
  };
  r.readAsText(f,'utf-8');
 }
-function autoSaveCharacter(){
- try{
-   const data=getCharacterState();
-   // localStorage 不保存肖像，避免大型圖片塞爆瀏覽器儲存空間；
-   // JSON 手動存檔仍會完整保存肖像。
-   data.portrait='';
-   localStorage.setItem('traveler_character_autosave_v2',JSON.stringify(data));
- }catch(e){console.warn('自動存檔失敗',e)}
+
+const LS_AUTOSAVE_KEY = 'traveler_character_autosave_v2';
+const LS_SLOTS_KEY = 'traveler_character_slots_v1';
+const LS_CURRENT_SLOT_KEY = 'traveler_character_current_slot_v1';
+let currentSlotId = null;
+let suppressAutoSave = false;
+
+function formatTime(iso){
+  try{
+    const d = new Date(iso);
+    if(isNaN(d)) return '—';
+    const pad = n => String(n).padStart(2,'0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }catch{return '—'}
 }
+
+function getSlotsMap(){
+  try{
+    const raw = localStorage.getItem(LS_SLOTS_KEY);
+    if(!raw) return {};
+    const obj = JSON.parse(raw);
+    return (obj && typeof obj === 'object') ? obj : {};
+  }catch(e){
+    console.warn('讀取角色槽失敗', e);
+    return {};
+  }
+}
+
+function setSlotsMap(map){
+  localStorage.setItem(LS_SLOTS_KEY, JSON.stringify(map));
+}
+
+function defaultSlotName(){
+  const name = ($('charName').value || '無名旅者').trim() || '無名旅者';
+  const level = n('charLevel');
+  return `${name} Lv${level}`;
+}
+
+function syncSlotNameHint(){
+  // no-op placeholder for future; keeps input editable
+}
+
+function setAutosaveStatus(msg, ok){
+  const el = $('autosaveStatus');
+  if(!el) return;
+  el.textContent = msg;
+  el.classList.toggle('on', !!ok);
+}
+
+function renderLocalSlots(){
+  const list = $('localSlotsList');
+  if(!list) return;
+  const map = getSlotsMap();
+  const entries = Object.entries(map).sort((a,b)=>{
+    const ta = a[1]?.savedAt || '';
+    const tb = b[1]?.savedAt || '';
+    return tb.localeCompare(ta);
+  });
+  if(!entries.length){
+    list.innerHTML = '<div class="local-empty">尚未有本機角色槽。按「儲存到本機」建立第一筆。</div>';
+    return;
+  }
+  list.innerHTML = entries.map(([id, slot])=>{
+    const active = id === currentSlotId;
+    const title = esc(slot.name || '未命名角色');
+    const meta = `Lv${slot.level ?? 0} · ${formatTime(slot.savedAt)}${active ? ' · 使用中' : ''}`;
+    return `<div class="local-row" data-slot="${esc(id)}">
+      <div class="local-meta"><strong>${title}</strong><small>${meta}</small></div>
+      <button class="btn" onclick="loadLocalSlot('${esc(id)}')">${active ? '重新載入' : '載入'}</button>
+      <button class="btn danger" onclick="deleteLocalSlot('${esc(id)}')">刪除</button>
+    </div>`;
+  }).join('');
+}
+
+function saveToLocalSlot(overwriteId){
+  try{
+    const data = getCharacterState();
+    const map = getSlotsMap();
+    const id = overwriteId || currentSlotId || ('slot_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,7));
+    const customName = ($('slotName').value || '').trim();
+    const slotName = customName || defaultSlotName();
+    map[id] = {
+      id,
+      name: slotName,
+      level: data.identity?.level ?? 0,
+      savedAt: new Date().toISOString(),
+      data
+    };
+    setSlotsMap(map);
+    const isUpdate = !!(overwriteId || currentSlotId);
+    currentSlotId = id;
+    try{ localStorage.setItem(LS_CURRENT_SLOT_KEY, id); }catch(e){}
+    $('slotName').value = slotName;
+    // also refresh autosave
+    autoSaveCharacter(true);
+    renderLocalSlots();
+    showToast(isUpdate ? '本機角色已更新' : '已儲存到本機');
+    setAutosaveStatus('自動存檔：已同步 · ' + formatTime(new Date().toISOString()), true);
+  }catch(e){
+    console.error(e);
+    showToast('本機儲存失敗（可能空間不足）');
+  }
+}
+
+function loadLocalSlot(id){
+  const map = getSlotsMap();
+  const slot = map[id];
+  if(!slot || !slot.data){
+    showToast('找不到該角色槽');
+    renderLocalSlots();
+    return;
+  }
+  try{
+    suppressAutoSave = true;
+    applyCharacterState(slot.data);
+    currentSlotId = id;
+    try{ localStorage.setItem(LS_CURRENT_SLOT_KEY, id); }catch(e){}
+    $('slotName').value = slot.name || defaultSlotName();
+    suppressAutoSave = false;
+    autoSaveCharacter(true);
+    renderLocalSlots();
+    showToast('已載入：' + (slot.name || '角色'));
+  }catch(e){
+    suppressAutoSave = false;
+    console.error(e);
+    showToast('載入失敗');
+  }
+}
+
+function deleteLocalSlot(id){
+  if(!confirm('確定刪除此本機角色槽？此操作無法復原。')) return;
+  const map = getSlotsMap();
+  delete map[id];
+  setSlotsMap(map);
+  if(currentSlotId === id){
+    currentSlotId = null;
+    try{ localStorage.removeItem(LS_CURRENT_SLOT_KEY); }catch(e){}
+  }
+  renderLocalSlots();
+  showToast('角色槽已刪除');
+}
+
+function newCharacter(){
+  if(!confirm('建立新角色？目前未儲存的變更可能遺失（可先按「儲存到本機」）。')) return;
+  suppressAutoSave = true;
+  currentSlotId = null;
+  try{ localStorage.removeItem(LS_CURRENT_SLOT_KEY); }catch(e){}
+  $('charName').value = '無名旅者';
+  $('charLevel').value = 0;
+  $('charExp').value = 0;
+  statList.forEach(x => $(`stat_${x.id}`).value = 0);
+  equipmentList.forEach(([key]) => {
+    $(`eq_name_${key}`).value = '';
+    $(`eq_stat_${key}`).value = '';
+  });
+  freeAllocList.forEach(x => $(`free_${x.key}`).value = 0);
+  toolsData = [];
+  renderTools();
+  $('charSupplement').value = '';
+  $('slotName').value = '';
+  removePortrait();
+  suppressAutoSave = false;
+  updateCard();
+  renderLocalSlots();
+  showToast('已建立新角色');
+}
+
+function autoSaveCharacter(force){
+  if(suppressAutoSave && !force) return;
+  try{
+    const data = getCharacterState();
+    // localStorage 自動存檔不保存肖像，避免大型圖片塞爆空間；
+    // 「儲存到本機」槽位與 JSON 檔案仍會完整保存肖像。
+    const autoData = {...data, portrait: ''};
+    localStorage.setItem(LS_AUTOSAVE_KEY, JSON.stringify(autoData));
+    // 若目前有綁定槽位，同步更新槽位資料（含肖像）
+    if(currentSlotId){
+      const map = getSlotsMap();
+      if(map[currentSlotId]){
+        map[currentSlotId].data = data;
+        map[currentSlotId].level = data.identity?.level ?? 0;
+        map[currentSlotId].savedAt = new Date().toISOString();
+        if(!($('slotName').value || '').trim()){
+          map[currentSlotId].name = defaultSlotName();
+        } else {
+          map[currentSlotId].name = $('slotName').value.trim();
+        }
+        setSlotsMap(map);
+      }
+    }
+    setAutosaveStatus('自動存檔：已寫入 · ' + formatTime(new Date().toISOString()), true);
+  }catch(e){
+    console.warn('自動存檔失敗', e);
+    setAutosaveStatus('自動存檔失敗（空間可能不足）', false);
+  }
+}
+
 function loadAutoSave(){
- try{
-   const raw=localStorage.getItem('traveler_character_autosave_v2');
-   if(raw){applyCharacterState(JSON.parse(raw));return true}
- }catch(e){console.warn('讀取自動存檔失敗',e)}
- return false
+  try{
+    // Prefer last used slot
+    const lastId = localStorage.getItem(LS_CURRENT_SLOT_KEY);
+    const map = getSlotsMap();
+    if(lastId && map[lastId] && map[lastId].data){
+      applyCharacterState(map[lastId].data);
+      currentSlotId = lastId;
+      $('slotName').value = map[lastId].name || defaultSlotName();
+      return true;
+    }
+    const raw = localStorage.getItem(LS_AUTOSAVE_KEY);
+    if(raw){
+      applyCharacterState(JSON.parse(raw));
+      return true;
+    }
+  }catch(e){console.warn('讀取自動存檔失敗',e)}
+  return false
 }
+
 function initApp(){
- init();
- loadAutoSave();
+  init();
+  loadAutoSave();
+  renderLocalSlots();
+  // Prefill slot name if empty
+  if(!$('slotName').value){
+    $('slotName').value = defaultSlotName();
+  }
+  setAutosaveStatus('自動存檔：已就緒', true);
 }
 initApp();
 </script></body></html>
+
 
 
 
